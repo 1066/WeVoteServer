@@ -2,7 +2,7 @@
 # Brought to you by We Vote. Be good.
 # -*- coding: UTF-8 -*-
 
-from ballot.models import MEASURE, OFFICE, CANDIDATE
+from ballot.models import MEASURE, OFFICE, CANDIDATE, POLITICIAN
 import codecs
 import csv
 from django.db import models
@@ -26,6 +26,7 @@ KIND_OF_BATCH_CHOICES = (
     (CANDIDATE,         'Candidate'),
     (ORGANIZATION_WORD, 'Organization'),
     (POSITION,          'Position'),
+    (POLITICIAN, 'Politician'),
 )
 
 TO_BE_DETERMINED = 'TBD'
@@ -39,6 +40,9 @@ KIND_OF_ACTION_CHOICES = (
     (CREATE,            'Create'),
     (ADD_TO_EXISTING,   'Add to Existing'),
 )
+
+LANGUAGE_CODE_ENGLISH = 'en'
+LANGUAGE_CODE_SPANISH = 'es'
 
 logger = wevote_functions.admin.get_logger(__name__)
 
@@ -410,7 +414,7 @@ class BatchManager(models.Model):
     def retrieve_batch_row_action_organization(self, batch_header_id, batch_row_id):
         try:
             batch_row_action_organization = BatchRowActionOrganization.objects.get(batch_header_id=batch_header_id,
-                                                                       batch_row_id=batch_row_id)
+                                                                                   batch_row_id=batch_row_id)
             batch_row_action_found = True
             success = True
             status = "BATCH_ROW_ACTION_ORGANIZATION_RETRIEVED"
@@ -484,11 +488,35 @@ class BatchManager(models.Model):
         xml_root = xml_tree.getroot()
 
         if xml_root:
-            if kind_of_batch == 'MEASURE':
-                return(self.store_measure_xml(batch_uri,google_civic_election_id, organization_we_vote_id, xml_root))
+            if kind_of_batch == MEASURE:
+                return(self.store_measure_xml(batch_uri, google_civic_election_id, organization_we_vote_id, xml_root))
+            elif kind_of_batch == OFFICE:
+                return(self.store_office_xml(batch_uri, google_civic_election_id, organization_we_vote_id, xml_root))
+            elif kind_of_batch == CANDIDATE:
+                return(self.store_candidate_xml(batch_uri, google_civic_election_id, organization_we_vote_id, xml_root))
+            elif kind_of_batch == POLITICIAN:
+                return(self.store_politician_xml(batch_uri, google_civic_election_id, organization_we_vote_id, xml_root))
+            else:
+                results = {
+                    'success': False,
+                    'status': '',
+                    'batch_header_id': 0,
+                    'batch_saved': False,
+                    'number_of_batch_rows': 0,
+                }
+                return results
 
     def store_measure_xml(self, batch_uri, google_civic_election_id, organization_we_vote_id, xml_root):
+        """
+
+        :param batch_uri:
+        :param google_civic_election_id:
+        :param organization_we_vote_id:
+        :param xml_root:
+        :return:
+        """
         # Process BallotMeasureContest data
+
         number_of_batch_rows = 0
         first_line = True
         success = False
@@ -507,27 +535,35 @@ class BatchManager(models.Model):
             # ElectoralDistrictId, other::ctcl-uid
             ballot_measure_id = one_ballot_measure.attrib['id']
 
-            ballot_measure_subtitle = one_ballot_measure.find('BallotSubTitle/Text')
-            if ballot_measure_subtitle is not None:
-                ballot_measure_subtitle = ballot_measure_subtitle.text
+            ballot_measure_subtitle_node = one_ballot_measure.find('BallotSubTitle/Text')
+            if ballot_measure_subtitle_node is not None:
+                ballot_measure_subtitle = ballot_measure_subtitle_node.text
+            else:
+                ballot_measure_subtitle = ''
 
-            ballot_measure_title = one_ballot_measure.find('BallotTitle')
-            if ballot_measure_title is not None:
+            ballot_measure_title_node = one_ballot_measure.find('BallotTitle')
+            if ballot_measure_title_node is not None:
                 ballot_measure_title = one_ballot_measure.find('BallotTitle/Text').text
+            else:
+                ballot_measure_title = ''
 
-            electoral_district_id = one_ballot_measure.find('ElectoralDistrictId')
-            if electoral_district_id is not None:
-                electoral_district_id = electoral_district_id.text
+            electoral_district_id_node = one_ballot_measure.find('ElectoralDistrictId')
+            if electoral_district_id_node is not None:
+                electoral_district_id = electoral_district_id_node.text
+            else:
+                electoral_district_id = ''
 
-            ctcl_uuid = one_ballot_measure.find(
+            ctcl_uuid_node = one_ballot_measure.find(
                 "./ExternalIdentifiers/ExternalIdentifier/[OtherType='ctcl-uuid']")
-            if ctcl_uuid is not None:
+            if ctcl_uuid_node is not None:
                 ctcl_uuid = one_ballot_measure.find(
                     "./ExternalIdentifiers/ExternalIdentifier/[OtherType='ctcl-uuid']/Value").text
 
-            ballot_measure_name = one_ballot_measure.find('Name')
-            if ballot_measure_name is not None:
-                ballot_measure_name = ballot_measure_name.text
+            ballot_measure_name_node = one_ballot_measure.find('Name')
+            if ballot_measure_name_node is not None:
+                ballot_measure_name = ballot_measure_name_node.text
+            else:
+                ballot_measure_name = ''
 
             if first_line:
                 first_line = False
@@ -581,9 +617,9 @@ class BatchManager(models.Model):
                 break
 
             # check for measure_id, title OR subtitle or name AND ctcl_uuid
-            if (positive_value_exists(ballot_measure_id) and ctcl_uuid is not None and \
-                    (ballot_measure_subtitle is not None or ballot_measure_title is not None or \
-                                 ballot_measure_name is not None)):
+            if (positive_value_exists(ballot_measure_id) and positive_value_exists(ctcl_uuid) and \
+                    (positive_value_exists(ballot_measure_subtitle) or positive_value_exists(ballot_measure_title) or \
+                                 positive_value_exists(ballot_measure_name))):
 
                 try:
                     batch_row = BatchRow.objects.create(
@@ -609,6 +645,443 @@ class BatchManager(models.Model):
         }
         return results
 
+    def store_office_xml(self, batch_uri, google_civic_election_id, organization_we_vote_id, xml_root):
+        # Process VIP Office data
+        number_of_batch_rows = 0
+        first_line = True
+        success = False
+        status = ''
+        limit_for_testing = 5
+
+        # Look for Office and create the batch_header first. Office is the direct child node
+        # of VipObject
+        office_xml_node = xml_root.findall('Office')
+        # if ballot_measure_xml_node is not None:
+        for one_office in office_xml_node:
+            if number_of_batch_rows >= limit_for_testing:
+                break
+
+            # look for relevant child nodes under Office: id, Name, Description, ElectoralDistrictId,
+            # IsPartisan, other::ctcl-uid
+            office_id = one_office.attrib['id']
+
+            office_name_node = one_office.find("./Name/Text/[@language=LANGUAGE_CODE_ENGLISH]")
+            if office_name_node is not None:
+                office_name = office_name_node.text
+
+            office_description_node = one_office.find("Description/Text/[@language=LANGUAGE_CODE_ENGLISH]")
+            if office_description_node is not None:
+                office_description = office_description_node.text
+
+            electoral_district_id_node = one_office.find('ElectoralDistrictId')
+            if electoral_district_id_node is not None:
+                electoral_district_id = electoral_district_id_node.text
+
+            office_is_partisan_node = one_office.find('IsPartisan')
+            if office_is_partisan_node is not None:
+                office_is_partisan = office_is_partisan_node.text
+
+            ctcl_uuid_node = one_office.find(
+                "./ExternalIdentifiers/ExternalIdentifier/[OtherType='ctcl-uuid']")
+            if ctcl_uuid_node is not None:
+                ctcl_uuid = one_office.find(
+                    "./ExternalIdentifiers/ExternalIdentifier/[OtherType='ctcl-uuid']/Value").text
+
+            if first_line:
+                first_line = False
+                try:
+                    batch_header = BatchHeader.objects.create(
+                        batch_header_column_000='id',
+                        batch_header_column_001='Name',
+                        batch_header_column_002='Description',
+                        batch_header_column_003='ElectoralDistrictId',
+                        batch_header_column_004='IsPartisan',
+                        batch_header_column_005= 'other::ctcl-uuid',
+                    )
+                    batch_header_id = batch_header.id
+
+                    if positive_value_exists(batch_header_id):
+                        # Save an initial BatchHeaderMap
+                        batch_header_map = BatchHeaderMap.objects.create(
+                            batch_header_id=batch_header_id,
+                            batch_header_map_000='office_batch_id',
+                            batch_header_map_001='office_name',
+                            batch_header_map_002='office_description',
+                            batch_header_map_003='electoral_district_id',
+                            batch_header_map_004='office_is_partisan',
+                            batch_header_map_005 = 'office_ctcl_uuid',
+                        )
+                        batch_header_map_id = batch_header_map.id
+                        status += " BATCH_HEADER_MAP_SAVED"
+
+                    if positive_value_exists(batch_header_id) and positive_value_exists(batch_header_map_id):
+                        # Now save the BatchDescription
+                        batch_name = "OFFICE " + google_civic_election_id
+                        batch_description_text = ""
+                        batch_description = BatchDescription.objects.create(
+                            batch_header_id=batch_header_id,
+                            batch_header_map_id=batch_header_map_id,
+                            batch_name=batch_name,
+                            batch_description_text=batch_description_text,
+                            google_civic_election_id=google_civic_election_id,
+                            kind_of_batch='OFFICE',
+                            organization_we_vote_id=organization_we_vote_id,
+                            source_uri=batch_uri,
+                        )
+                        status += " BATCH_DESCRIPTION_SAVED"
+                        success = True
+                except Exception as e:
+                    # Stop trying to save rows -- break out of the for loop
+                    batch_header_id = 0
+                    status += " EXCEPTION_BATCH_HEADER"
+                    break
+            if not positive_value_exists(batch_header_id):
+                break
+
+            # check for office_batch_id or electoral_district or name AND ctcl_uuid
+            if positive_value_exists(office_id) and positive_value_exists(ctcl_uuid) and \
+                    (positive_value_exists(electoral_district_id) or positive_value_exists(office_name)):
+                try:
+                    batch_row = BatchRow.objects.create(
+                        batch_header_id=batch_header_id,
+                        batch_row_000= office_id,
+                        batch_row_001=office_name,
+                        batch_row_002=office_description,
+                        batch_row_003=electoral_district_id,
+                        batch_row_004=office_is_partisan,
+                        batch_row_005=ctcl_uuid
+                    )
+                    number_of_batch_rows += 1
+                except Exception as e:
+                    # Stop trying to save rows -- break out of the for loop
+                    status += " EXCEPTION_BATCH_ROW"
+                    break
+        results = {
+            'success': success,
+            'status': status,
+            'batch_header_id': batch_header_id,
+            'batch_saved': success,
+            'number_of_batch_rows': number_of_batch_rows,
+        }
+        return results
+
+    def store_politician_xml(self, batch_uri, google_civic_election_id, organization_we_vote_id, xml_root):
+        # Process VIP Person data
+        number_of_batch_rows = 0
+        first_line = True
+        success = False
+        status = ''
+        limit_for_testing = 5
+
+        # Look for Person and create the batch_header first. Person is the direct child node
+        # of VipObject
+        person_xml_node = xml_root.findall('Person')
+        for one_person in person_xml_node:
+            if number_of_batch_rows >= limit_for_testing:
+                break
+
+            # look for relevant child nodes under Person: id, FullName, FirstName, LastName, MiddleName, PartyId, Email,
+            # PhoneNumber, Website, Twitter, ctcl-uuid
+            person_id = one_person.attrib['id']
+
+            person_full_name_node = one_person.find("./FullName/Text/[@language=LANGUAGE_CODE_ENGLISH]")
+            if person_full_name_node is not None:
+                person_full_name = person_full_name_node.text
+            else:
+                person_full_name = ''
+
+            person_first_name_node = one_person.find('FirstName')
+            if person_first_name_node is not None:
+                person_first_name = person_first_name_node.text
+            else:
+                person_first_name = ''
+
+            person_middle_name_node = one_person.find('MiddleName')
+            if person_middle_name_node is not None:
+                person_middle_name = person_middle_name_node.text
+            else:
+                person_middle_name = ''
+
+            person_last_name_node = one_person.find('LastName')
+            if person_last_name_node is not None:
+                person_last_name = person_last_name_node.text
+            else:
+                person_last_name = ''
+
+            person_party_id_node = one_person.find('PartyId')
+            if person_party_id_node is not None:
+                person_party_id = person_party_id_node.text
+            else:
+                person_party_id = ''
+
+            person_email_id_node = one_person.find('./ContactInformation/Email')
+            if person_email_id_node is not None:
+                person_email_id = person_email_id_node.text
+            else:
+                person_email_id = ''
+
+            person_phone_number_node = one_person.find('./ContactInformation/Phone')
+            if person_phone_number_node is not None:
+                person_phone_number = person_phone_number_node.text
+            else:
+                person_phone_number = ''
+
+            person_website_url_node = one_person.find("./ContactInformation/Uri/[@annotation='website']")
+            if person_website_url_node is not None:
+                person_website_url = person_website_url_node.text
+            else:
+                person_website_url = ''
+
+            person_facebook_id_node = one_person.find("./ContactInformation/Uri/[@annotation='facebook']")
+            if person_facebook_id_node is not None:
+                person_facebook_id = person_facebook_id_node.text
+            else:
+                person_facebook_id = ''
+
+            person_twitter_id_node = one_person.find("./ContactInformation/Uri/[@annotation='twitter']")
+            if person_twitter_id_node is not None:
+                person_twitter_id = person_twitter_id_node.text
+            else:
+                person_twitter_id = ''
+
+            person_youtube_id_node = one_person.find("./ContactInformation/Uri/[@annotation='youtube']")
+            if person_youtube_id_node is not None:
+                person_youtube_id = person_youtube_id_node.text
+            else:
+                person_twitter_id = ''
+
+            person_googleplus_id_node = one_person.find("./ContactInformation/Uri/[@annotation='googleplus']")
+            if person_googleplus_id_node is not None:
+                person_googleplus_id = person_googleplus_id_node.text
+            else:
+                person_twitter_id = ''
+
+            ctcl_uuid_node = one_person.find(
+                "./ExternalIdentifiers/ExternalIdentifier/[OtherType='ctcl-uuid']")
+            if ctcl_uuid_node is not None:
+                ctcl_uuid = one_person.find(
+                    "./ExternalIdentifiers/ExternalIdentifier/[OtherType='ctcl-uuid']/Value").text
+
+            if first_line:
+                first_line = False
+                try:
+                    batch_header = BatchHeader.objects.create(
+                        batch_header_column_000='id',
+                        batch_header_column_001='FullName',
+                        batch_header_column_002='FirstName',
+                        batch_header_column_003='MiddleName',
+                        batch_header_column_004='LastName',
+                        batch_header_column_005='PartyId',
+                        batch_header_column_006='Email',
+                        batch_header_column_007='Phone',
+                        batch_header_column_008='uri::website',
+                        batch_header_column_009='uri::facebook',
+                        batch_header_column_010='uri::twitter',
+                        batch_header_column_011='other::ctcl-uuid',
+                    )
+                    batch_header_id = batch_header.id
+
+                    if positive_value_exists(batch_header_id):
+                        # Save an initial BatchHeaderMap
+                        batch_header_map = BatchHeaderMap.objects.create(
+                            batch_header_id=batch_header_id,
+                            batch_header_map_000='politician_batch_id',
+                            batch_header_map_001='politician_full_name',
+                            batch_header_map_002='politician_first_name',
+                            batch_header_map_003='politician_middle_name',
+                            batch_header_map_004='politician_last_name',
+                            batch_header_map_005='politician_party_id',
+                            batch_header_map_006='politician_email_address',
+                            batch_header_map_007='politician_phone_number',
+                            batch_header_map_008='politician_website_url',
+                            batch_header_map_009='politician_facebook_id',
+                            batch_header_map_010='politician_twitter_id',
+                            batch_header_map_011='politician_ctcl_uuid',
+                        )
+                        batch_header_map_id = batch_header_map.id
+                        status += " BATCH_HEADER_MAP_SAVED"
+
+                    if positive_value_exists(batch_header_id) and positive_value_exists(batch_header_map_id):
+                        # Now save the BatchDescription
+                        batch_name = "POLITICIAN " + google_civic_election_id
+                        batch_description_text = ""
+                        batch_description = BatchDescription.objects.create(
+                            batch_header_id=batch_header_id,
+                            batch_header_map_id=batch_header_map_id,
+                            batch_name=batch_name,
+                            batch_description_text=batch_description_text,
+                            google_civic_election_id=google_civic_election_id,
+                            kind_of_batch='POLITICIAN',
+                            organization_we_vote_id=organization_we_vote_id,
+                            source_uri=batch_uri,
+                        )
+                        status += " BATCH_DESCRIPTION_SAVED"
+                        success = True
+                except Exception as e:
+                    # Stop trying to save rows -- break out of the for loop
+                    batch_header_id = 0
+                    status += " EXCEPTION_BATCH_HEADER"
+                    break
+            if not positive_value_exists(batch_header_id):
+                break
+
+            # check for office_batch_id or electoral_district or name AND ctcl_uuid
+            # if positive_value_exists(person_id) and ctcl_uuid is not None or person_full_name is not None or \
+            #                 person_first_name is not None:
+            if positive_value_exists(person_id) and positive_value_exists(ctcl_uuid) and \
+                    (positive_value_exists(person_full_name) or positive_value_exists(person_first_name)):
+                try:
+                    batch_row = BatchRow.objects.create(
+                        batch_header_id=batch_header_id,
+                        batch_row_000= person_id,
+                        batch_row_001=person_full_name,
+                        batch_row_002=person_first_name,
+                        batch_row_003=person_middle_name,
+                        batch_row_004=person_last_name,
+                        batch_row_005=person_party_id,
+                        batch_row_006=person_email_id,
+                        batch_row_007=person_phone_number,
+                        batch_row_008=person_website_url,
+                        batch_row_009=person_facebook_id,
+                        batch_row_010=person_twitter_id,
+                        batch_row_011=ctcl_uuid,
+                    )
+                    number_of_batch_rows += 1
+                except Exception as e:
+                    # Stop trying to save rows -- break out of the for loop
+                    status += " EXCEPTION_BATCH_ROW"
+                    break
+        results = {
+            'success': success,
+            'status': status,
+            'batch_header_id': batch_header_id,
+            'batch_saved': success,
+            'number_of_batch_rows': number_of_batch_rows,
+        }
+        return results
+
+    def store_candidate_xml(self, batch_uri, google_civic_election_id, organization_we_vote_id, xml_root):
+        # Process VIP Candidate data
+        number_of_batch_rows = 0
+        first_line = True
+        success = False
+        status = ''
+        limit_for_testing = 5
+
+        # Look for Candidate and create the batch_header first. Candidate is the direct child node
+        # of VipObject
+        candidate_xml_node = xml_root.findall('Candidate')
+        for one_candidate in candidate_xml_node:
+            if number_of_batch_rows >= limit_for_testing:
+                break
+
+            # look for relevant child nodes under Candidate: id, BallotName, personId, PartyId, isTopTicket,
+            # other::ctcl-uid
+            candidate_id = one_candidate.attrib['id']
+
+            candidate_name_node = one_candidate.find("./BallotName/Text/[@language=LANGUAGE_CODE_ENGLISH]")
+            if candidate_name_node is not None:
+                candidate_name = candidate_name_node.text
+
+            candidate_person_id_node = one_candidate.find('./PersonId')
+            if candidate_person_id_node is not None:
+                candidate_person_id = candidate_person_id_node.text
+
+            candidate_party_id_node = one_candidate.find('./PartyId')
+            if candidate_party_id_node is not None:
+                candidate_party_id = candidate_party_id_node.text
+            else:
+                candidate_party_id = ''
+
+            candidate_is_top_ticket_node = one_candidate.find('IsTopTicket')
+            if candidate_is_top_ticket_node is not None:
+                candidate_is_top_ticket = candidate_is_top_ticket_node.text
+            else:
+                candidate_is_top_ticket = ''
+
+            ctcl_uuid_node = one_candidate.find(
+                "./ExternalIdentifiers/ExternalIdentifier/[OtherType='ctcl-uuid']")
+            if ctcl_uuid_node is not None:
+                ctcl_uuid = one_candidate.find(
+                    "./ExternalIdentifiers/ExternalIdentifier/[OtherType='ctcl-uuid']/Value").text
+
+            if first_line:
+                first_line = False
+                try:
+                    batch_header = BatchHeader.objects.create(
+                        batch_header_column_000='id',
+                        batch_header_column_001='PersonId',
+                        batch_header_column_002='Name',
+                        batch_header_column_003='PartyId',
+                        batch_header_column_004='IsTopTicket',
+                        batch_header_column_005= 'other::ctcl-uuid',
+                    )
+                    batch_header_id = batch_header.id
+
+                    if positive_value_exists(batch_header_id):
+                        # Save an initial BatchHeaderMap
+                        batch_header_map = BatchHeaderMap.objects.create(
+                            batch_header_id=batch_header_id,
+                            batch_header_map_000='candidate_batch_id',
+                            batch_header_map_001='candidate_person_id',
+                            batch_header_map_002='candidate_name',
+                            batch_header_map_003='candidate_party_id',
+                            batch_header_map_004='candidate_is_top_ticket',
+                            batch_header_map_005='candidate_ctcl_uuid',
+                        )
+                        batch_header_map_id = batch_header_map.id
+                        status += " BATCH_HEADER_MAP_SAVED"
+
+                    if positive_value_exists(batch_header_id) and positive_value_exists(batch_header_map_id):
+                        # Now save the BatchDescription
+                        batch_name = "CANDIDATE " + google_civic_election_id
+                        batch_description_text = ""
+                        batch_description = BatchDescription.objects.create(
+                            batch_header_id=batch_header_id,
+                            batch_header_map_id=batch_header_map_id,
+                            batch_name=batch_name,
+                            batch_description_text=batch_description_text,
+                            google_civic_election_id=google_civic_election_id,
+                            kind_of_batch='CANDIDATE',
+                            organization_we_vote_id=organization_we_vote_id,
+                            source_uri=batch_uri,
+                        )
+                        status += " BATCH_DESCRIPTION_SAVED"
+                        success = True
+                except Exception as e:
+                    # Stop trying to save rows -- break out of the for loop
+                    batch_header_id = 0
+                    status += " EXCEPTION_BATCH_HEADER"
+                    break
+            if not positive_value_exists(batch_header_id):
+                break
+
+            # check for candidate_id or candidate_person_id or name AND ctcl_uuid
+            if positive_value_exists(candidate_id) and positive_value_exists(ctcl_uuid) and \
+                    (positive_value_exists(candidate_person_id) or positive_value_exists(candidate_name)):
+                try:
+                    batch_row = BatchRow.objects.create(
+                        batch_header_id=batch_header_id,
+                        batch_row_000= candidate_id,
+                        batch_row_001=candidate_person_id,
+                        batch_row_002=candidate_name,
+                        batch_row_003=candidate_party_id,
+                        batch_row_004=candidate_is_top_ticket,
+                        batch_row_005=ctcl_uuid
+                    )
+                    number_of_batch_rows += 1
+                except Exception as e:
+                    # Stop trying to save rows -- break out of the for loop
+                    status += " EXCEPTION_BATCH_ROW"
+                    break
+        results = {
+            'success': success,
+            'status': status,
+            'batch_header_id': batch_header_id,
+            'batch_saved': success,
+            'number_of_batch_rows': number_of_batch_rows,
+        }
+        return results
 
 class BatchDescription(models.Model):
     """

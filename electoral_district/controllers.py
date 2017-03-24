@@ -97,8 +97,7 @@ def electoral_district_import_from_xml_data(electoral_district_xml_data):
             # TODO check what constitutes a UNIQUE record in the table
             electoral_district_query = ElectoralDistrict.objects.order_by('id')
             if electoral_district_query:
-                electoral_district_query = electoral_district_query.filter(
-                    ctcl_id_temp=ctcl_id_temp, electoral_district_name=electoral_district_name)
+                electoral_district_query = electoral_district_query.filter(ctcl_id_temp=ctcl_id_temp)
                 # electoral_district_query = electoral_district_query.filter(
                 #     electoral_district_name=electoral_district_name)
                 # TODO currently update is not handled. Based on what constitues a unique row, update needs to be handled

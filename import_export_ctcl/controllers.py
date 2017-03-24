@@ -16,6 +16,8 @@ def import_ctcl_from_xml(request):
     if load_from_url:
         # Request xml file from CTCL servers
         logger.debug("TO BE IMPLEMENTED: Load CTCL XML from url")
+        # cURL command for VIP data:
+        # curl -u <username>:<passwd> https://ballotinfo.org/bip/vip.xml  -o <output_file_name>.xml
     else:
         # Load saved xml from local file
         logger.debug("Loading CTCL sample XML from local file")
